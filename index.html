@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8" />
-<title>Проверка отрисовок</title>
+<title>Проверка отрисовок — диагностика</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 
 <!--
@@ -144,7 +144,7 @@
 </style>
 </head>
 <body>
-<div style="position:fixed;top:10px;right:10px;z-index:9999;background:#E7F6EE;border:1px solid #1F9D66;color:#146c48;padding:8px 12px;border-radius:4px;font:600 12px Inter,sans-serif;">READ-ONLY тест · данные Bitrix24 не изменяются</div>
+<div style="position:fixed;top:10px;right:10px;z-index:9999;background:#E7F6EE;border:1px solid #1F9D66;color:#146c48;padding:8px 12px;border-radius:4px;font:600 12px Inter,sans-serif;">READ-ONLY диагностика · данные Bitrix24 не изменяются</div>
 
 
 <div class="grid-backdrop"></div>
@@ -236,17 +236,40 @@ function isWebhookUrlValid(v){
   } catch(e){ return false; }
 }
 function bitrixMethodUrl(method){ return getWebhookUrl() + method + '.json'; }
+function describeFetchFailure(method, err){
+  var target = bitrixMethodUrl(method);
+  var origin = window.location.origin || '(неизвестно)';
+  var online = navigator.onLine === false ? 'нет' : 'да';
+  var base = (err && err.message) ? err.message : String(err || 'неизвестная ошибка');
+  return 'Не удалось выполнить запрос к Bitrix24. ' +
+    'Метод: ' + method + '. ' +
+    'Страница терминала: ' + origin + '. ' +
+    'Адрес Bitrix24: ' + (function(){ try{return new URL(target).origin;}catch(e){return 'не удалось определить';} })() + '. ' +
+    'Интернет: ' + online + '. ' +
+    'Ошибка браузера: ' + base + '. ' +
+    'Если текст ошибки — Failed to fetch, наиболее вероятна блокировка междоменного запроса браузером (CORS) либо сетевой фильтр. ' +
+    'Это диагностический READ-ONLY тест: данные Bitrix24 не изменяются.';
+}
+
 function bitrixFetch(method, params){
   if (!isWebhookUrlValid(getWebhookUrl())) return Promise.reject(new Error('Укажите корректный URL входящего вебхука Bitrix24.'));
   return fetch(bitrixMethodUrl(method), {
     method:'POST',
+    mode:'cors',
+    credentials:'omit',
+    cache:'no-store',
     headers:{ 'Content-Type':'application/json' },
     body: JSON.stringify(params || {})
   }).then(function(r){
+    if (!r.ok){
+      throw new Error('HTTP ' + r.status + ' ' + (r.statusText || ''));
+    }
     return r.json().catch(function(){ throw new Error('Bitrix24 вернул ответ, который не удалось прочитать. HTTP ' + r.status); });
   }).then(function(data){
-    if (data && data.error) throw new Error(data.error_description || data.error);
+    if (data && data.error) throw new Error((data.error_description || data.error) + (data.error ? ' [' + data.error + ']' : ''));
     return data ? data.result : null;
+  }).catch(function(err){
+    throw new Error(describeFetchFailure(method, err));
   });
 }
 function wrapBitrixResult(data, err){
@@ -555,7 +578,7 @@ function search(){
   els.tasksContainer.innerHTML = '<div class="loading-state">Загрузка…</div>';
 
   loadSpaceItems(id);
-  loadTasks(id);
+  els.tasksContainer.innerHTML = '<div class="empty-state">READ-ONLY тест: задачи пока не запрашиваются. Сначала проверяем только CRM.</div>';
 }
 
 function loadSpaceItems(houseId){
