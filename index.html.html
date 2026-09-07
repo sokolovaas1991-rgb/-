@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Проверка отрисовок</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<!--
+  =====================================================================
+  ЧТО ЭТО
+
+  Локальное приложение Bitrix24. Секретов в коде нет — авторизация
+  идёт через BX24 SDK, когда страница открыта внутри портала (в iframe).
+
+  ЛОГИКА
+
+  1) Ищем элементы смарт-процесса «Отрисовки» в воронке «Качество»
+     по ID дома.
+  2) Для каждого найденного элемента — вопрос «Взять в работу?».
+       Да  → карточка переносится на этап «В работе» (crm.item.update),
+             и в поле «2D. Качество. Проверяющий отрисовку» проставляется
+             текущий пользователь (тот, под чьим логином открыто
+             приложение — определяется через user.current, BX24 сам
+             знает, кто сейчас авторизован в портале).
+       Нет → возврат на страницу поиска
+  3) Ниже — связанные задачи Bitrix24 (как раньше, необязательная секция).
+
+  АВТООПРЕДЕЛЕНИЕ (можно переопределить вручную константами ниже)
+    - entityTypeId смарт-процесса — по слову в названии "отрисов"
+    - код поля с ID дома — по слову в названии поля "дом"
+    - categoryId воронки — по слову в названии воронки "качество"
+    - код этапа "В работе" внутри этой воронки — по слову "в работе"
+
+  Если автопоиск найдёт не то (несколько совпадений или ничего),
+  приложение покажет ошибку с точным описанием — тогда пропишите
+  нужный ID/код руками в OVERRIDE-константы.
+
+  РАЗВЁРТЫВАНИЕ
+  1. Разместить файл на публичном HTTPS-адресе (например GitHub Pages).
+  2. Bitrix24 → Разработчикам → Другое → Локальное приложение →
+     указать адрес файла. Права (scope): crm, task, user.
+  =====================================================================
+-->
+
+<script src="https://api.bitrix24.com/api/v1/"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root{
+    --bg:#F7F9FB; --surface:#FFFFFF; --ink:#14213D; --muted:#5B6B82;
+    --faint:#8593A8; --line:#DCE4EC; --grid:#E4EAF2; --accent:#2F6FED;
+    --accent-bg:#EAF1FE; --green:#1F9D66; --green-bg:#E7F6EE;
+    --amber:#B4720B; --amber-bg:#FCF1DD; --red:#C4401F; --red-bg:#FCEAE3;
+  }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--bg); font-family:'Inter',sans-serif; color:var(--ink); min-height:100vh; position:relative; }
+  .grid-backdrop{
+    position:fixed; inset:0; pointer-events:none;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size:28px 28px;
+    -webkit-mask-image:radial-gradient(ellipse 80% 60% at 50% 20%, black 40%, transparent 90%);
+    mask-image:radial-gradient(ellipse 80% 60% at 50% 20%, black 40%, transparent 90%);
+  }
+  .mono{ font-family:'JetBrains Mono',monospace; }
+  .eyebrow{ display:inline-flex; align-items:center; gap:8px; font-size:12px; letter-spacing:.14em; color:var(--accent); text-transform:uppercase; }
+  #search-view{ position:relative; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+  .search-card{ position:relative; width:100%; max-width:480px; }
+  .search-card h1{ font-family:'Space Grotesk',sans-serif; font-size:32px; font-weight:600; text-align:center; margin:14px 0 8px; letter-spacing:-0.01em; }
+  .search-card p.sub{ text-align:center; color:var(--muted); font-size:14.5px; line-height:1.5; margin-bottom:28px;}
+  .panel{ position:relative; background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:28px 28px 24px; box-shadow:0 1px 2px rgba(20,33,61,.04); }
+  .field-label{ display:block; font-size:11px; letter-spacing:.1em; color:var(--faint); text-transform:uppercase; margin-bottom:8px; }
+  .id-input-wrap{ display:flex; align-items:center; gap:10px; border:1px solid #C9D3E0; border-radius:3px; padding:12px 14px; background:#FCFDFE; }
+  .id-input-wrap.error{ border-color:#E4A691; }
+  #house-id{ border:none; outline:none; background:transparent; font-size:17px; width:100%; color:var(--ink); font-family:'JetBrains Mono',monospace; }
+  #house-id::placeholder{ color:#B2BDCC; }
+  .error-text{ margin-top:10px; font-size:13px; color:var(--red); line-height:1.5; }
+  .btn-primary{
+    margin-top:18px; width:100%; display:flex; align-items:center; justify-content:center;
+    gap:8px; background:var(--ink); color:var(--bg); border:none; border-radius:3px;
+    padding:13px 16px; font-weight:600; font-size:14.5px; cursor:pointer; font-family:'Inter',sans-serif;
+  }
+  .btn-primary:disabled{ opacity:.5; cursor:default; }
+  .hint{ text-align:center; margin-top:18px; font-size:12px; color:#9AA6B8; }
+
+  #results-view{ display:none; padding:36px 24px 60px; }
+  .results-inner{ max-width:720px; margin:0 auto; }
+  .back-btn{ display:flex; align-items:center; gap:6px; background:none; border:none; color:var(--muted); font-size:13.5px; cursor:pointer; padding:0; margin-bottom:22px; }
+  .house-card{ background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:22px 26px; margin-bottom:22px; }
+  .house-title{ font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:600; margin:3px 0 0;}
+
+  .section-label{ font-size:11px; letter-spacing:.1em; color:var(--faint); text-transform:uppercase; margin:26px 0 10px; padding-left:4px; }
+  .section-label:first-of-type{ margin-top:0; }
+  .list-box{ background:var(--surface); border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+  .row{ padding:15px 22px; border-top:1px solid #EEF2F6; }
+  .row:first-child{ border-top:none; }
+  .row-top{ display:flex; align-items:center; gap:14px; }
+  .row-idx{ font-size:12px; color:#B2BDCC; width:26px; flex-shrink:0; }
+  .row-title{ font-size:14px; font-weight:500; }
+  .row-sub{ font-size:11.5px; color:#9AA6B8; margin-top:3px; }
+  .badge{ display:flex; align-items:center; gap:6px; border-radius:3px; padding:5px 10px; font-size:12px; font-weight:600; white-space:nowrap; flex-shrink:0; }
+
+  .prompt{ display:flex; align-items:center; gap:12px; margin-top:12px; padding-top:12px; border-top:1px dashed #EEF2F6; flex-wrap:wrap; }
+  .prompt-text{ font-size:13px; color:var(--ink); font-weight:500; }
+  .prompt-btn{ border:1px solid #C9D3E0; background:#FCFDFE; border-radius:3px; padding:7px 14px; font-size:13px; font-weight:600; cursor:pointer; font-family:'Inter',sans-serif; }
+  .prompt-btn.yes{ border-color:var(--green); color:var(--green); }
+  .prompt-btn.no{ border-color:var(--red); color:var(--red); }
+  .prompt-btn:disabled{ opacity:.5; cursor:default; }
+  .prompt-status{ font-size:13px; font-weight:600; }
+  .prompt-status.ok{ color:var(--green); }
+  .prompt-status.err{ color:var(--red); }
+
+  .empty-state, .loading-state{ background:var(--surface); border:1px dashed var(--line); border-radius:4px; padding:24px; text-align:center; color:var(--faint); font-size:13.5px; }
+
+  .plan-check{ margin-top:14px; padding-top:14px; border-top:1px dashed #EEF2F6; }
+  .plan-check-title{ font-size:12.5px; font-weight:700; color:var(--accent); margin-bottom:10px; text-transform:uppercase; letter-spacing:.06em; }
+  .pc-step{ display:flex; gap:10px; font-size:13px; color:var(--muted); margin-bottom:9px; line-height:1.5; }
+  .pc-step-num{ font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--faint); flex-shrink:0; padding-top:1px; }
+  .pc-link{ color:var(--accent); text-decoration:none; font-weight:600; }
+  .pc-link:hover{ text-decoration:underline; }
+  .pc-missing{ color:var(--faint); font-style:italic; }
+
+  .dropzones{ display:flex; gap:12px; margin:14px 0; flex-wrap:wrap; }
+  .dropzone{ flex:1; min-width:200px; border:1px dashed #C9D3E0; border-radius:4px; padding:14px; background:#FCFDFE; }
+  .dropzone-label{ font-size:11.5px; font-weight:700; color:var(--ink); margin-bottom:6px; }
+  .dropzone input[type=file]{ font-size:12px; width:100%; }
+  .dropzone .count{ font-size:11.5px; color:var(--faint); margin-top:6px; }
+
+  .compare-btn{
+    display:flex; align-items:center; justify-content:center; gap:8px; background:var(--accent); color:#fff;
+    border:none; border-radius:3px; padding:10px 16px; font-weight:600; font-size:13.5px; cursor:pointer;
+    font-family:'Inter',sans-serif;
+  }
+  .compare-btn:disabled{ opacity:.5; cursor:default; }
+
+  .report-box{ margin-top:14px; }
+  .report-box table{ width:100%; border-collapse:collapse; font-size:12.5px; }
+  .report-box th{ text-align:left; background:#F2F5F9; color:var(--faint); font-size:11px; text-transform:uppercase; letter-spacing:.05em; padding:8px 10px; border:1px solid var(--line); }
+  .report-box td{ padding:8px 10px; border:1px solid var(--line); vertical-align:top; }
+  .report-box p{ font-size:13px; color:var(--ink); line-height:1.6; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+
+<div class="grid-backdrop"></div>
+
+<!-- ЭКРАН ПОИСКА -->
+<div id="search-view">
+  <div class="search-card">
+    <div style="text-align:center;">
+      <span class="eyebrow mono">Bitrix24 · терминал задач</span>
+      <h1>Проверка отрисовок</h1>
+      <p class="sub">Введите ID дома — терминал найдёт элементы в<br/>воронке «Качество» пространства «Отрисовки».</p>
+    </div>
+    <div class="panel">
+      <label class="field-label mono">ID_ДОМА</label>
+      <div class="id-input-wrap" id="input-wrap">
+        <input id="house-id" class="mono" placeholder="например, 4521" autocomplete="off" />
+      </div>
+      <div id="error-text" class="error-text" style="display:none;"></div>
+      <button id="search-btn" class="btn-primary">Найти дом →</button>
+    </div>
+    <p class="hint mono" id="auth-hint">подключение к Bitrix24…</p>
+  </div>
+</div>
+
+<!-- ЭКРАН РЕЗУЛЬТАТОВ -->
+<div id="results-view">
+  <div class="results-inner">
+    <button class="back-btn mono" id="back-btn">← назад к поиску</button>
+
+    <div class="house-card">
+      <span class="eyebrow mono" id="house-id-label" style="color:var(--faint);">ID_ДОМА —</span>
+      <div class="house-title" id="house-title">—</div>
+    </div>
+
+    <div class="section-label mono">Данные для проверки планировок · загружаются один раз на дом</div>
+    <div class="panel" style="padding:20px 22px;">
+      <div class="dropzones" style="margin:0;">
+        <div class="dropzone">
+          <div class="dropzone-label">Снимок квартирографии</div>
+          <input type="file" accept="image/*,.pdf" data-role="house-upload" data-zone="quarterography" />
+          <div class="count mono" data-role="house-filelist" data-zone="quarterography">файл не загружен</div>
+        </div>
+        <div class="dropzone">
+          <div class="dropzone-label">Исходные планировки (как есть)</div>
+          <input type="file" multiple accept=".zip,image/*,.pdf" data-role="house-upload" data-zone="originalPlans" />
+          <div class="count mono" data-role="house-filelist" data-zone="originalPlans">файлы не загружены</div>
+        </div>
+        <div class="dropzone">
+          <div class="dropzone-label">Нарезанные планировки (по типам)</div>
+          <input type="file" multiple accept=".zip,image/*,.pdf" data-role="house-upload" data-zone="cutPlans" />
+          <div class="count mono" data-role="house-filelist" data-zone="cutPlans">файлы не загружены</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label mono">Отрисовки · воронка «Качество»</div>
+    <div id="space-container"><div class="loading-state">Загрузка…</div></div>
+
+    <div class="section-label mono">Связанные задачи Bitrix24</div>
+    <div id="tasks-container"><div class="loading-state">Загрузка…</div></div>
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+   РУЧНЫЕ НАСТРОЙКИ (заполнить, если автоопределение не подойдёт)
+   ===================================================================== */
+var SPACE_TITLE_MATCH = 'отрисов';            // подстрока в названии смарт-процесса
+var HOUSE_FIELD_MATCH = 'дом';                 // подстрока в названии поля с ID дома
+var FUNNEL_TITLE_MATCH = 'качество';           // подстрока в названии воронки
+var TARGET_STAGE_MATCH = 'в работе';           // подстрока в названии целевого этапа
+
+var SPACE_ENTITY_TYPE_ID_OVERRIDE = null;      // например: 1046
+var SPACE_HOUSE_FIELD_OVERRIDE = null;         // например: 'ufCrm7_1699999999'
+var FUNNEL_CATEGORY_ID_OVERRIDE = null;        // например: 3
+var TARGET_STAGE_ID_OVERRIDE = null;           // например: 'DT1046_3:PREPARATION'
+
+var INSPECTOR_FIELD_MATCH = 'проверя';         // подстрока в названии поля "2D. Качество. Проверяющий отрисовку"
+var INSPECTOR_FIELD_OVERRIDE = null;           // например: 'ufCrm7_1700000001', если знаете точно
+
+var TYPE_FIELD_MATCH = 'тип отрисов';          // подстрока в названии поля "Тип отрисовки"
+var TYPE_FIELD_OVERRIDE = null;
+var PLAN_TYPE_VALUE_MATCH = 'планир';          // подстрока значения, означающая "Планировки"
+
+var SOURCE_FOLDER_FIELD_MATCH = 'исходник';    // подстрока в названии поля "Ссылка к папке с исходниками"
+var SOURCE_FOLDER_FIELD_OVERRIDE = null;
+
+var APARTMENT_LINK_FIELD_MATCH = 'апартамент'; // подстрока в названии поля "Ссылка апартаментов"
+var APARTMENT_LINK_FIELD_OVERRIDE = null;
+
+var CONSTRUCTOR_URL = 'https://content-management.nmarket.pro/house-schema-constructor/';
+var DRIVE_URL = 'https://drive.nmarket.pro:5001/';
+var CLAUDE_MODEL = 'claude-sonnet-4-6';
+
+var HOUSE_ID_FIELD = 'UF_TASK_HOUSE_ID';       // код поля с ID дома в ЗАДАЧЕ
+
+var TASK_SOURCE_FIELD_MATCH = 'исходник';      // подстрока в названии поля задачи "Ссылка к папке с исходниками"
+var TASK_SOURCE_FIELD_OVERRIDE = null;         // например: 'UF_AUTO_1001'
+var TASK_APARTMENT_FIELD_MATCH = 'апартамент'; // подстрока в названии поля задачи "Ссылка апартаментов в hart"
+var TASK_APARTMENT_FIELD_OVERRIDE = null;      // например: 'UF_AUTO_1002'
+
+var STAGE_META = {
+  overdue:  { label:'Просрочено',   color:'var(--red)',   bg:'var(--red-bg)'   },
+  progress: { label:'В работе',     color:'var(--accent)',bg:'var(--accent-bg)'},
+  deferred: { label:'На доработке', color:'var(--amber)', bg:'var(--amber-bg)' },
+  done:     { label:'Согласовано',  color:'var(--green)', bg:'var(--green-bg)' }
+};
+function classifyTask(task){
+  var now = new Date();
+  var deadline = task.DEADLINE ? new Date(task.DEADLINE) : null;
+  if (task.STATUS === '5') return 'done';
+  if (task.STATUS === '6') return 'deferred';
+  if (deadline && deadline < now) return 'overdue';
+  return 'progress';
+}
+
+var els = {
+  input: document.getElementById('house-id'),
+  inputWrap: document.getElementById('input-wrap'),
+  errorText: document.getElementById('error-text'),
+  searchBtn: document.getElementById('search-btn'),
+  authHint: document.getElementById('auth-hint'),
+  searchView: document.getElementById('search-view'),
+  resultsView: document.getElementById('results-view'),
+  backBtn: document.getElementById('back-btn'),
+  houseIdLabel: document.getElementById('house-id-label'),
+  houseTitle: document.getElementById('house-title'),
+  spaceContainer: document.getElementById('space-container'),
+  tasksContainer: document.getElementById('tasks-container')
+};
+
+function showError(msg){ els.errorText.textContent = msg; els.errorText.style.display = 'block'; els.inputWrap.classList.add('error'); }
+function clearError(){ els.errorText.style.display = 'none'; els.inputWrap.classList.remove('error'); }
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
+}
+function resetToSearch(){
+  els.resultsView.style.display = 'none';
+  els.searchView.style.display = 'flex';
+  els.input.value = '';
+  clearError();
+}
+
+/* ---------------------------------------------------------------------
+   АВТООПРЕДЕЛЕНИЕ: смарт-процесс → поле дома → воронка → этап «в работе»
+--------------------------------------------------------------------- */
+var spaceMeta = { entityTypeId:null, houseField:null, ready:false, error:null };
+var flowMeta  = { categoryId:null, workStageId:null, ready:false, error:null };
+var itemsById = {};
+var currentHouseId = null;
+var planFiles = {}; // { itemId: { original:[{name,mediaType,base64}], final:[...] } }
+var houseInputs = { quarterography: null, originalPlans: [], cutPlans: [] };
+
+function resolveSpaceMeta(callback){
+  if (spaceMeta.ready || spaceMeta.error){ callback(); return; }
+
+  if (SPACE_ENTITY_TYPE_ID_OVERRIDE && SPACE_HOUSE_FIELD_OVERRIDE){
+    spaceMeta.entityTypeId = SPACE_ENTITY_TYPE_ID_OVERRIDE;
+    spaceMeta.houseField = SPACE_HOUSE_FIELD_OVERRIDE;
+    spaceMeta.ready = true; callback(); return;
+  }
+
+  BX24.callMethod('crm.type.list', {}, function(res){
+    if (res.error()){ spaceMeta.error = 'Не удалось получить список смарт-процессов: ' + res.error(); callback(); return; }
+    var types = (res.data() && res.data().types) || [];
+    var matches = types.filter(function(t){ return (t.title || '').toLowerCase().indexOf(SPACE_TITLE_MATCH) !== -1; });
+    if (matches.length !== 1){
+      spaceMeta.error = matches.length === 0
+        ? 'Смарт-процесс со словом «' + SPACE_TITLE_MATCH + '» не найден. Укажите SPACE_ENTITY_TYPE_ID_OVERRIDE.'
+        : 'Найдено несколько смарт-процессов (' + matches.map(function(m){return m.title;}).join(', ') + '). Укажите SPACE_ENTITY_TYPE_ID_OVERRIDE.';
+      callback(); return;
+    }
+    var entityTypeId = matches[0].entityTypeId;
+
+    BX24.callMethod('crm.item.fields', { entityTypeId: entityTypeId }, function(fieldsRes){
+      if (fieldsRes.error()){ spaceMeta.error = 'Не удалось получить поля смарт-процесса: ' + fieldsRes.error(); callback(); return; }
+      var fields = (fieldsRes.data() && fieldsRes.data().fields) || {};
+      var houseField = SPACE_HOUSE_FIELD_OVERRIDE;
+      if (!houseField){
+        var fm = Object.keys(fields).filter(function(code){
+          var title = (fields[code] && (fields[code].title || fields[code].formLabel)) || '';
+          return title.toLowerCase().indexOf(HOUSE_FIELD_MATCH) !== -1;
+        });
+        if (fm.length !== 1){
+          spaceMeta.error = fm.length === 0
+            ? 'Поле с ID дома («' + HOUSE_FIELD_MATCH + '») не найдено. Укажите SPACE_HOUSE_FIELD_OVERRIDE.'
+            : 'Найдено несколько подходящих полей (' + fm.join(', ') + '). Укажите SPACE_HOUSE_FIELD_OVERRIDE.';
+          callback(); return;
+        }
+        houseField = fm[0];
+      }
+
+      // Поле "2D. Качество. Проверяющий отрисовку" — заполняется текущим пользователем при "Да"
+      var inspectorField = INSPECTOR_FIELD_OVERRIDE;
+      var inspectorWarning = null;
+      if (!inspectorField){
+        var im = Object.keys(fields).filter(function(code){
+          var title = (fields[code] && (fields[code].title || fields[code].formLabel)) || '';
+          return title.toLowerCase().indexOf(INSPECTOR_FIELD_MATCH) !== -1;
+        });
+        if (im.length === 1){
+          inspectorField = im[0];
+        } else {
+          inspectorWarning = im.length === 0
+            ? 'Поле «Проверяющий отрисовку» не найдено — при переносе в работу оно не будет заполнено. Укажите INSPECTOR_FIELD_OVERRIDE.'
+            : 'Найдено несколько подходящих полей для «Проверяющий отрисовку» — оно не будет заполнено автоматически. Укажите INSPECTOR_FIELD_OVERRIDE.';
+        }
+      }
+
+      // Поле "Тип отрисовки" — чтобы понять, нужна ли проверка квартирографии
+      function findFieldByMatch(overrideVal, matchStr){
+        if (overrideVal) return { code: overrideVal, warning: null };
+        var m = Object.keys(fields).filter(function(code){
+          var title = (fields[code] && (fields[code].title || fields[code].formLabel)) || '';
+          return title.toLowerCase().indexOf(matchStr) !== -1;
+        });
+        if (m.length === 1) return { code: m[0], warning: null };
+        return { code: null, warning: m.length === 0
+          ? 'Поле по подстроке «' + matchStr + '» не найдено.'
+          : 'Найдено несколько подходящих полей по подстроке «' + matchStr + '».' };
+      }
+
+      var typeFieldRes = findFieldByMatch(TYPE_FIELD_OVERRIDE, TYPE_FIELD_MATCH);
+      var sourceFieldRes = findFieldByMatch(SOURCE_FOLDER_FIELD_OVERRIDE, SOURCE_FOLDER_FIELD_MATCH);
+      var apartmentFieldRes = findFieldByMatch(APARTMENT_LINK_FIELD_OVERRIDE, APARTMENT_LINK_FIELD_MATCH);
+
+      var typeFieldItems = null;
+      if (typeFieldRes.code && fields[typeFieldRes.code] && fields[typeFieldRes.code].items){
+        typeFieldItems = {};
+        fields[typeFieldRes.code].items.forEach(function(opt){ typeFieldItems[opt.ID] = opt.VALUE; });
+      }
+
+      spaceMeta.entityTypeId = entityTypeId;
+      spaceMeta.houseField = houseField;
+      spaceMeta.inspectorField = inspectorField;
+      spaceMeta.inspectorWarning = inspectorWarning;
+      spaceMeta.typeField = typeFieldRes.code;
+      spaceMeta.typeFieldWarning = typeFieldRes.warning;
+      spaceMeta.typeFieldItems = typeFieldItems;
+      spaceMeta.sourceField = sourceFieldRes.code;
+      spaceMeta.apartmentField = apartmentFieldRes.code;
+      spaceMeta.ready = true;
+      callback();
+    });
+  });
+}
+
+/* ---------------------------------------------------------------------
+   ТЕКУЩИЙ ПОЛЬЗОВАТЕЛЬ (тот, под чьим логином открыто приложение)
+--------------------------------------------------------------------- */
+var currentUser = { id:null, name:null, ready:false, error:null };
+
+function resolveCurrentUser(callback){
+  if (currentUser.ready || currentUser.error){ callback(); return; }
+  BX24.callMethod('user.current', {}, function(res){
+    if (res.error()){ currentUser.error = 'Не удалось определить текущего пользователя: ' + res.error(); callback(); return; }
+    var u = res.data();
+    currentUser.id = u.ID;
+    currentUser.name = (u.NAME || '') + ' ' + (u.LAST_NAME || '');
+    currentUser.ready = true;
+    callback();
+  });
+}
+
+function resolveFlowMeta(callback){
+  if (flowMeta.ready || flowMeta.error){ callback(); return; }
+  if (!spaceMeta.ready){ flowMeta.error = 'Сначала не удалось определить смарт-процесс.'; callback(); return; }
+
+  function withCategory(categoryId){
+    if (TARGET_STAGE_ID_OVERRIDE){
+      flowMeta.categoryId = categoryId;
+      flowMeta.workStageId = TARGET_STAGE_ID_OVERRIDE;
+      flowMeta.ready = true; callback(); return;
+    }
+    BX24.callMethod('crm.category.stage.list', { entityTypeId: spaceMeta.entityTypeId, categoryId: categoryId }, function(stageRes){
+      if (stageRes.error()){ flowMeta.error = 'Не удалось получить этапы воронки: ' + stageRes.error(); callback(); return; }
+      var stages = stageRes.data() || [];
+      var sm = stages.filter(function(s){ return (s.NAME || '').toLowerCase().indexOf(TARGET_STAGE_MATCH) !== -1; });
+      if (sm.length !== 1){
+        flowMeta.error = sm.length === 0
+          ? 'Этап «' + TARGET_STAGE_MATCH + '» в воронке не найден. Укажите TARGET_STAGE_ID_OVERRIDE.'
+          : 'Найдено несколько подходящих этапов. Укажите TARGET_STAGE_ID_OVERRIDE.';
+        callback(); return;
+      }
+      flowMeta.categoryId = categoryId;
+      flowMeta.workStageId = sm[0].STATUS_ID;
+      flowMeta.ready = true;
+      callback();
+    });
+  }
+
+  if (FUNNEL_CATEGORY_ID_OVERRIDE !== null){ withCategory(FUNNEL_CATEGORY_ID_OVERRIDE); return; }
+
+  BX24.callMethod('crm.category.list', { entityTypeId: spaceMeta.entityTypeId }, function(catRes){
+    if (catRes.error()){ flowMeta.error = 'Не удалось получить список воронок: ' + catRes.error(); callback(); return; }
+    var cats = (catRes.data() && catRes.data().category) || catRes.data() || [];
+    var cm = cats.filter(function(c){ return (c.name || '').toLowerCase().indexOf(FUNNEL_TITLE_MATCH) !== -1; });
+    if (cm.length !== 1){
+      flowMeta.error = cm.length === 0
+        ? 'Воронка со словом «' + FUNNEL_TITLE_MATCH + '» не найдена. Укажите FUNNEL_CATEGORY_ID_OVERRIDE.'
+        : 'Найдено несколько подходящих воронок. Укажите FUNNEL_CATEGORY_ID_OVERRIDE.';
+      callback(); return;
+    }
+    withCategory(cm[0].id);
+  });
+}
+
+/* ---------------------------------------------------------------------
+   ПОИСК И РЕНДЕР
+--------------------------------------------------------------------- */
+function search(){
+  var id = els.input.value.trim();
+  clearError();
+  if (!id){ showError('Введите ID дома.'); return; }
+
+  currentHouseId = id;
+  els.searchView.style.display = 'none';
+  els.resultsView.style.display = 'block';
+  els.houseIdLabel.textContent = 'ID_ДОМА ' + id;
+  els.houseTitle.textContent = 'Дом ' + id;
+  els.spaceContainer.innerHTML = '<div class="loading-state">Загрузка…</div>';
+  els.tasksContainer.innerHTML = '<div class="loading-state">Загрузка…</div>';
+
+  loadSpaceItems(id);
+  loadTasks(id);
+}
+
+function loadSpaceItems(houseId){
+  resolveSpaceMeta(function(){
+    if (spaceMeta.error){ els.spaceContainer.innerHTML = '<div class="empty-state">' + escapeHtml(spaceMeta.error) + '</div>'; return; }
+    resolveFlowMeta(function(){
+      if (flowMeta.error){ els.spaceContainer.innerHTML = '<div class="empty-state">' + escapeHtml(flowMeta.error) + '</div>'; return; }
+
+      var filter = {};
+      filter[spaceMeta.houseField] = houseId;
+      filter.categoryId = flowMeta.categoryId;
+
+      var selectFields = ['id','title','stageId','categoryId', spaceMeta.houseField];
+      [spaceMeta.typeField, spaceMeta.sourceField, spaceMeta.apartmentField].forEach(function(f){
+        if (f) selectFields.push(f);
+      });
+
+      BX24.callMethod('crm.item.list', { entityTypeId: spaceMeta.entityTypeId, filter: filter, select: selectFields }, function(res){
+        if (res.error()){ els.spaceContainer.innerHTML = '<div class="empty-state">Ошибка запроса: ' + escapeHtml(res.error()) + '</div>'; return; }
+        var items = (res.data() && res.data().items) || [];
+        if (items.length === 0){
+          els.spaceContainer.innerHTML = '<div class="empty-state">Элементов с ID дома «' + escapeHtml(houseId) + '» в воронке «' + escapeHtml(FUNNEL_TITLE_MATCH) + '» не найдено.</div>';
+          return;
+        }
+        items.forEach(function(it){ itemsById[it.id] = it; });
+        els.spaceContainer.innerHTML = '<div class="list-box">' + items.map(function(it, i){
+          return '<div class="row" data-item-id="' + it.id + '">' +
+            '<div class="row-top">' +
+              '<span class="row-idx mono">' + String(i+1).padStart(2,'0') + '</span>' +
+              '<div style="flex:1;min-width:180px;">' +
+                '<div class="row-title">' + escapeHtml(it.title || ('Элемент #' + it.id)) + '</div>' +
+                '<div class="row-sub mono">#' + it.id + '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="prompt" data-role="prompt">' +
+              '<span class="prompt-text">Взять в работу?</span>' +
+              '<button class="prompt-btn yes" data-action="yes">Да</button>' +
+              '<button class="prompt-btn no" data-action="no">Нет</button>' +
+            '</div>' +
+          '</div>';
+        }).join('') + '</div>';
+      });
+    });
+  });
+}
+
+// Делегирование кликов по кнопкам "Да / Нет"
+els.spaceContainer.addEventListener('click', function(e){
+  var btn = e.target.closest('.prompt-btn');
+  if (!btn) return;
+  var row = btn.closest('.row');
+  var itemId = row.getAttribute('data-item-id');
+  var promptEl = row.querySelector('[data-role="prompt"]');
+
+  if (btn.dataset.action === 'no'){
+    resetToSearch();
+    return;
+  }
+
+  // Да → переносим карточку на этап "В работе" и указываем проверяющего
+  promptEl.innerHTML = '<span class="prompt-text">Переношу на этап «В работе»…</span>';
+
+  resolveFlowMeta(function(){
+    if (flowMeta.error){
+      promptEl.innerHTML = '<span class="prompt-status err">' + escapeHtml(flowMeta.error) + '</span>';
+      return;
+    }
+    resolveCurrentUser(function(){
+      var fields = { stageId: flowMeta.workStageId };
+      var warnings = [];
+
+      if (spaceMeta.inspectorField && currentUser.ready){
+        fields[spaceMeta.inspectorField] = currentUser.id;
+      } else if (spaceMeta.inspectorWarning){
+        warnings.push(spaceMeta.inspectorWarning);
+      } else if (currentUser.error){
+        warnings.push(currentUser.error);
+      }
+
+      BX24.callMethod('crm.item.update', {
+        entityTypeId: spaceMeta.entityTypeId,
+        id: itemId,
+        fields: fields
+      }, function(res){
+        if (res.error()){
+          promptEl.innerHTML = '<span class="prompt-status err">Не удалось перенести карточку: ' + escapeHtml(res.error()) + '</span>';
+          return;
+        }
+        var okMsg = '✓ Взято в работу' + (fields[spaceMeta.inspectorField] ? ' · проверяющий: ' + escapeHtml(currentUser.name) : '');
+        var html = '<span class="prompt-status ok">' + okMsg + '</span>';
+        warnings.forEach(function(w){ html += '<div class="prompt-status err" style="margin-top:6px;flex-basis:100%;">' + escapeHtml(w) + '</div>'; });
+
+        var item = itemsById[itemId] || {};
+        var typeText = '';
+        if (spaceMeta.typeField){
+          var raw = item[spaceMeta.typeField];
+          if (raw != null){
+            typeText = (spaceMeta.typeFieldItems && spaceMeta.typeFieldItems[raw]) || String(raw);
+          }
+        }
+        var isPlanType = typeText.toLowerCase().indexOf(PLAN_TYPE_VALUE_MATCH) !== -1;
+
+        if (isPlanType){
+          html += renderPlanCheckBlock(itemId, item);
+        }
+
+        promptEl.innerHTML = html;
+      });
+    });
+  });
+});
+
+/* ---------------------------------------------------------------------
+   ПРОВЕРКА ПЛАНИРОВОК: чек-лист, загрузка архивов/файлов, сравнение
+--------------------------------------------------------------------- */
+var EXT_MEDIA_TYPE = {
+  png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', gif:'image/gif', pdf:'application/pdf'
+};
+
+function renderPlanCheckBlock(itemId, item){
+  planFiles[itemId] = { final: [] };
+
+  var html = '' +
+    '<div class="plan-check">' +
+      '<div class="plan-check-title">Тип: Планировки — нужна проверка квартирографии</div>' +
+      '<div class="pc-step"><span class="pc-step-num mono">01</span><span>Откройте <a class="pc-link" href="' + CONSTRUCTOR_URL + '" target="_blank" rel="noopener">конструктор квартирографии →</a> и впишите ID дома <b class="mono">' + escapeHtml(currentHouseId || '') + '</b> в поле «ID в НГ».</span></div>' +
+      '<div data-role="task-links" data-item-id="' + itemId + '"><div class="loading-state">Загрузка задач…</div></div>' +
+      '<div class="pc-step" style="margin-top:12px;"><span class="pc-step-num mono">02</span><span>Откройте дом по ссылке из столбца «Название», затем нажмите значок «кв-фия».</span></div>' +
+      '<div class="pc-step"><span class="pc-step-num mono">03</span><span>Перейдите по ссылкам задачи выше: «Ссылка к папке с исходниками» (сервис <a class="pc-link" href="' + DRIVE_URL + '" target="_blank" rel="noopener">' + DRIVE_URL + '</a>, войдите под своим логином) и «Ссылка апартаментов в hart».</span></div>' +
+      '<div class="pc-step"><span class="pc-step-num mono">04</span><span>Снимок квартирографии и «Оригинальные планировки» загружаются один раз выше, для всего дома. Скачайте «Готовые планировки» и загрузите их здесь.</span></div>' +
+
+      '<div class="dropzones">' +
+        '<div class="dropzone">' +
+          '<div class="dropzone-label">Готовые планировки</div>' +
+          '<input type="file" multiple accept=".zip,image/*,.pdf" data-role="upload" data-zone="final" data-item-id="' + itemId + '" />' +
+          '<div class="count mono" data-role="filelist" data-zone="final" data-item-id="' + itemId + '">файлы не загружены</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<button class="compare-btn" data-action="compare" data-item-id="' + itemId + '" disabled>Сравнить и сформировать отчёт</button>' +
+      '<div class="report-box" data-role="report" data-item-id="' + itemId + '"></div>' +
+    '</div>';
+
+  setTimeout(function(){ loadTaskLinksForPlanBlock(itemId, currentHouseId); }, 0);
+  return html;
+}
+
+function blobToBase64(blob){
+  return new Promise(function(resolve, reject){
+    var reader = new FileReader();
+    reader.onload = function(){ resolve(reader.result.split(',')[1]); };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function extFromName(name){
+  var m = /\.([a-z0-9]+)$/i.exec(name || '');
+  return m ? m[1].toLowerCase() : '';
+}
+
+async function collectFilesFromInput(input){
+  var out = [];
+  var skipped = [];
+  var files = Array.from(input.files || []);
+  for (var i = 0; i < files.length; i++){
+    var f = files[i];
+    var ext = extFromName(f.name);
+    if (ext === 'zip'){
+      try{
+        var zip = await JSZip.loadAsync(f);
+        var entries = Object.keys(zip.files);
+        for (var j = 0; j < entries.length; j++){
+          var entry = zip.files[entries[j]];
+          if (entry.dir) continue;
+          var eExt = extFromName(entry.name);
+          var mediaType = EXT_MEDIA_TYPE[eExt];
+          if (!mediaType){ skipped.push(entry.name); continue; }
+          var blob = await entry.async('blob');
+          var base64 = await blobToBase64(blob);
+          out.push({ name: entry.name, mediaType: mediaType, base64: base64 });
+        }
+      } catch(e){
+        skipped.push(f.name + ' (не удалось распаковать)');
+      }
+    } else {
+      var mt = EXT_MEDIA_TYPE[ext] || f.type;
+      if (!mt || (mt.indexOf('image/') !== 0 && mt !== 'application/pdf')){
+        skipped.push(f.name); continue;
+      }
+      var b64 = await blobToBase64(f);
+      out.push({ name: f.name, mediaType: mt, base64: b64 });
+    }
+  }
+  return { files: out, skipped: skipped };
+}
+
+els.spaceContainer.addEventListener('change', function(e){
+  var input = e.target.closest('input[data-role="upload"]');
+  if (!input) return;
+  var itemId = input.dataset.itemId;
+  var zone = input.dataset.zone;
+  var listEl = document.querySelector('[data-role="filelist"][data-zone="' + zone + '"][data-item-id="' + itemId + '"]');
+  var compareBtn = document.querySelector('.compare-btn[data-item-id="' + itemId + '"]');
+  listEl.textContent = 'Обработка…';
+
+  collectFilesFromInput(input).then(function(result){
+    planFiles[itemId] = planFiles[itemId] || { final: [] };
+    planFiles[itemId][zone] = result.files;
+
+    var text = result.files.length + ' файл(ов): ' + result.files.map(function(f){ return f.name; }).join(', ');
+    if (result.skipped.length){
+      text += ' · пропущено (неподдерживаемый формат): ' + result.skipped.join(', ');
+    }
+    listEl.textContent = result.files.length ? text : 'подходящих файлов не найдено';
+
+    compareBtn.disabled = !(houseInputs.originalPlans.length && planFiles[itemId].final.length);
+  });
+});
+
+// Загрузка «на уровне дома»: снимок квартирографии + исходные + нарезанные планировки (один раз на весь дом)
+document.addEventListener('change', function(e){
+  var input = e.target.closest('input[data-role="house-upload"]');
+  if (!input) return;
+  var zone = input.dataset.zone;
+  var listEl = document.querySelector('[data-role="house-filelist"][data-zone="' + zone + '"]');
+  listEl.textContent = 'Обработка…';
+
+  collectFilesFromInput(input).then(function(result){
+    if (zone === 'quarterography'){
+      houseInputs.quarterography = result.files[0] || null;
+      listEl.textContent = houseInputs.quarterography ? '1 файл: ' + houseInputs.quarterography.name : 'файл не загружен';
+    } else {
+      houseInputs[zone] = result.files;
+      var text = result.files.length + ' файл(ов): ' + result.files.map(function(f){ return f.name; }).join(', ');
+      if (result.skipped.length){ text += ' · пропущено: ' + result.skipped.join(', '); }
+      listEl.textContent = result.files.length ? text : 'файлы не загружены';
+    }
+    // пересчитываем доступность всех уже отрисованных кнопок "Сравнить"
+    document.querySelectorAll('.compare-btn[data-item-id]').forEach(function(btn){
+      var itemId = btn.dataset.itemId;
+      var pf = planFiles[itemId] || { final: [] };
+      btn.disabled = !(houseInputs.originalPlans.length && pf.final.length);
+    });
+  });
+});
+
+var COMPARE_INSTRUCTIONS = `1. Проверка квартирографии относительно поэтажного плана
+Для каждой квартиры без исключений нужно идти по цепочке:
+секция → этаж → стояк → квартира на исходном поэтажном плане → фактическая планировка квартиры → соответствующий тип/отрисовка → название типа в квартирографии.
+Нельзя считать тип правильным только потому, что совпадает общая площадь.
+Например, если два типа имеют общую площадь 34,90 м², но:
+• у одного коридор 3,60 м² и с/у 4,30 м²;
+• у другого коридор 3,80 м² и с/у 4,10 м²;
+это разные типы, и нужно определить, какой именно соответствует конкретной квартире на поэтажном плане.
+Для каждой позиции в квартирографии проверить:
+• секцию;
+• этаж;
+• стояк;
+• строительный номер квартиры, если он указан на поэтажном плане;
+• общую площадь;
+• количество комнат;
+• форму и геометрию квартиры;
+• расположение входа;
+• расположение кухни;
+• расположение жилых комнат;
+• расположение коридора;
+• расположение санузла/санузлов;
+• взаимное расположение всех помещений;
+• расположение окон;
+• направление выхода окон;
+• количество окон;
+• расположение лоджии;
+• расположение балкона;
+• расположение террасы;
+• конфигурацию лоджии/балкона/террасы;
+• площади всех помещений.
+Если хотя бы один из этих признаков отличается, тип нельзя автоматически считать тем же самым.
+
+2. Определение правильного типа
+Если тип, указанный в квартирографии, не соответствует квартире на исходном поэтажном плане, нужно:
+• определить, какой тип указан сейчас;
+• найти среди исходных типов/отрисовок тот тип, который действительно соответствует данной квартире;
+• указать, по каким признакам установлен правильный тип.
+Особенно внимательно проверять квартиры:
+• с одинаковой общей площадью;
+• с одинаковым количеством комнат;
+• с похожей геометрией;
+• отличающиеся только коридором, санузлом, расположением окна, лоджии или входа;
+• являющиеся зеркальными или почти зеркальными версиями друг друга;
+• имеющие разные суффиксы при одинаковой основной площади, например 1-3490-4 и 1-3490-5.
+Совпадение общей площади не является достаточным подтверждением типа.
+Тип считается подтвержденным только после проверки всей геометрии и всех площадей помещений.
+
+3. Проверка исходной планировки против готовой отрисовки
+После того как установлен правильный тип квартиры, нужно отдельно проверить его готовую отрисовку относительно исходного плана этого типа.
+Проверять:
+• все стены и форму квартиры;
+• расположение помещений;
+• вход;
+• дверные проемы, если они влияют на планировку;
+• окна;
+• направление выхода окон;
+• лоджии;
+• балконы;
+• террасы;
+• форму и расположение наружных элементов;
+• площади помещений;
+• общую площадь.
+
+4. Проверка каждого метража помещения
+Нужно проверить каждую площадь каждого помещения.
+Все площади, указанные на исходном плане, должны быть перенесены на отрисовку.
+Проверять не только правильность цифр, но и отсутствие пропущенных подписей.
+То есть ошибкой считать:
+• неправильную площадь помещения;
+• опечатку в площади;
+• замену одного метража на другой;
+• отсутствие подписи площади, если на исходнике она есть;
+• подпись площади не у того помещения;
+• потерю площади лоджии/балкона/террасы;
+• лишнюю площадь, которой нет на исходном плане.
+Нужно сравнивать:
+• жилые комнаты;
+• кухни;
+• кухни-гостиные;
+• коридоры;
+• прихожие;
+• санузлы;
+• ванные;
+• гардеробные;
+• кладовые внутри квартиры;
+• лоджии;
+• балконы;
+• террасы;
+• и любые другие помещения, которые есть в исходном плане.
+
+5. Проверка общей площади квартиры
+Особенно проверить число общей площади, которое на отрисовке выделено оранжевой чертой.
+Оно должно точно соответствовать общей площади типа.
+Название типа кодирует общую площадь.
+Например:
+• 1-3490 → общая площадь должна быть 34,90 м²;
+• 2-5200-3 → 52,00 м²;
+• 3-8225-1 → 82,25 м².
+Сравнение вести с точностью до сотых, с запятой.
+Если в названии типа одна площадь, а под оранжевой чертой указана другая — это ошибка.
+Также сверять общую площадь с исходным планом, а не только с названием файла.
+
+6. Балконы, лоджии и террасы
+При проверке учитывать, что на исходных поэтажных планах могут быть указаны:
+• площадь с коэффициентом;
+• фактическая площадь в скобках;
+• отдельный расчет для террасы.
+Например:
+0,90/(3,00)
+или
+1,60/(5,30)
+или
+Терраса 12,00 × 0,3 = 3,60.
+Нужно правильно понимать, какое значение должно быть перенесено на отрисовку согласно принятому формату.
+При этом проверить:
+• наличие самого балкона/лоджии/террасы;
+• правильную сторону квартиры;
+• правильную форму;
+• правильную площадь;
+• правильный выход из помещения;
+• соответствие окнам и балконным дверям.
+
+7. Проверка окон
+Для каждой квартиры сравнить исходный поэтажный план и отрисовку.
+Проверить:
+• на каких наружных стенах находятся окна;
+• количество окон;
+• расположение окон относительно помещений;
+• направление выхода окон;
+• наличие окон на лоджию/балкон;
+• наличие балконной двери;
+• не пропущено ли окно;
+• не добавлено ли лишнее окно.
+Если квартира на исходном поэтажном плане имеет окна на одну сторону, а отрисовка показывает другое направление — это ошибка.
+Если тип зеркальный относительно другого типа, нельзя считать их одинаковыми только по площади — необходимо учитывать ориентацию окон и геометрию.
+
+8. Как определять виновника ошибки
+Если ошибка находится в самой готовой отрисовке — ставить пометку:
+дизайнер
+К ошибкам дизайнера относятся, например:
+• неправильная площадь помещения на отрисовке;
+• пропущенная подпись площади;
+• неправильная общая площадь под оранжевой чертой;
+• неверно нарисованная стена;
+• неправильная конфигурация помещения;
+• лишнее или отсутствующее окно;
+• неправильное расположение окна;
+• неверный балкон/лоджия/терраса;
+• неправильная ориентация отрисовки относительно того типа, который она должна изображать.
+Если сама отрисовка существует и соответствует определенному исходному типу, но оператор назначил этой квартире неправильное название типа в квартирографии/системе — ставить:
+оператор
+К ошибкам оператора относятся, например:
+• квартире назначен 1-3490-5, хотя по поэтажному плану она соответствует 1-3490-4;
+• перепутаны два похожих типа;
+• неправильно выбран суффикс;
+• правильная отрисовка привязана не к той квартире;
+• тип поставлен не на тот этаж/стояк;
+• перепутаны зеркальные или похожие варианты.
+Если проблема одновременно есть и в назначении типа, и в самой отрисовке, указать обе ошибки отдельно.
+
+9. Не делать вывод по одному признаку
+Запрещено считать тип правильным только на основании:
+• совпадения общей площади;
+• совпадения количества комнат;
+• похожей формы;
+• похожего названия;
+• одинаковой площади большей части помещений.
+Перед подтверждением типа нужно проверить совокупность признаков:
+геометрия + все помещения + все площади + вход + окна + лоджия/балкон/терраса + положение квартиры на поэтажном плане.
+Если две планировки отличаются хотя бы одним существенным элементом, нужно рассматривать их как разные типы.
+
+10. Проверять каждый этаж и каждую секцию независимо
+Не считать, что один стояк обязательно имеет один и тот же тип на всех этажах.
+Для каждого этажа проверять квартиру заново по исходному поэтажному плану.
+То есть:
+• секция 1, этаж 1, стояк 1;
+• секция 1, этаж 2, стояк 1;
+• секция 1, этаж 3, стояк 1;
+• секция 1, этаж 4, стояк 1;
+— это четыре отдельные проверки.
+То же самое для всех остальных стояков и секций.
+
+11. Повторяющиеся типы
+Если один и тот же тип действительно используется в нескольких квартирах, это не ошибка.
+Но повтор разрешается подтвердить только после сравнения каждой такой квартиры с поэтажным планом.
+Не предполагать автоматически, что раз один тип подошел одной квартире, значит он подходит другой квартире той же площади.
+
+12. Приоритет источников при спорных случаях
+Если данные расходятся, использовать следующую логику:
+1. исходный поэтажный архитектурный план — для определения того, какая квартира реально находится в конкретной позиции здания и какая у нее геометрия;
+2. исходный индивидуальный план квартиры — для точных площадей помещений и деталей конкретного типа;
+3. готовая отрисовка — проверяемый результат дизайнера;
+4. квартирография/название в системе — проверяемое назначение оператора.
+Не подгонять исходные данные под квартирографию.
+Если квартирография противоречит исходному архитектурному плану, считать квартирографию потенциально ошибочной и определить правильный тип по исходнику.
+
+13. Формат результата
+Итог представить в таблице с двумя столбцами:
+Название | Список ошибок
+В поле «Название» желательно указывать:
+Секция — этаж — стояк — квартира № — тип
+Например:
+Секция 2, этаж 2, стояк 10, квартира №58 — 1-3490-5
+В поле «Список ошибок» писать максимально конкретно.
+Пример:
+Оператор: в квартирографии указан тип 1-3490-5, должен быть 1-3490-4. На исходном поэтажном плане у квартиры №58 коридор 3,80 м² и с/у 4,10 м², тогда как у 1-3490-5 коридор 3,60 м² и с/у 4,30 м². Геометрия входной зоны также отличается.
+Пример ошибки дизайнера:
+Дизайнер: на исходном плане кухня 12,30 м², на отрисовке указано 12,51 м². Остальные площади соответствуют.
+Пример нескольких ошибок:
+Дизайнер: отсутствует подпись площади коридора 6,60 м²; площадь кухни указана 18,40 м² вместо 18,50 м²; общая площадь под оранжевой чертой 53,80 м² вместо 53,90 м².
+Если ошибок нет, писать:
+Ошибок не обнаружено.
+
+14. Дополнительная итоговая сводка
+После таблицы отдельно написать:
+• сколько всего квартир/типов проверено;
+• сколько ошибок оператора;
+• сколько ошибок дизайнера;
+• список всех квартир с неправильным типом;
+• список всех отрисовок с ошибками;
+• есть ли ошибки по окнам;
+• есть ли ошибки по лоджиям/балконам/террасам;
+• есть ли пропущенные площади;
+• есть ли неправильные общие площади;
+• есть ли случаи, где типы имеют одинаковую общую площадь, но разные планировки.
+
+15. Важное требование к качеству проверки
+Не ограничиваться автоматическим сравнением текста или названий.
+Нужно визуально изучать поэтажные планы и отрисовки, потому что часть различий определяется только геометрией:
+• зеркальность;
+• расположение входа;
+• положение перегородок;
+• сторона санузла;
+• расположение кухни;
+• положение лоджии;
+• направление окон.
+Если данные плохо читаются или нельзя достоверно определить соответствие, не угадывать. Написать, что конкретная позиция требует ручного уточнения.
+Главный принцип проверки:
+каждый тип должен быть доказан по геометрии и всем метражам, а не подобран по общей площади.
+
+Первый набор загруженных файлов — это исходные поэтажные планы/планировки квартир. Второй набор — готовые отрисовки, которые нужно проверить по всем пунктам выше.`;
+
+function mdTableToHtml(text){
+  var lines = text.split('\n');
+  var html = '';
+  var i = 0;
+  while (i < lines.length){
+    var line = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(line)){
+      var tableLines = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ tableLines.push(lines[i]); i++; }
+      // отбрасываем строку-разделитель (|---|---|)
+      tableLines = tableLines.filter(function(l){ return !/^\s*\|[\s:\-|]+\|\s*$/.test(l); });
+      if (tableLines.length){
+        html += '<table>';
+        tableLines.forEach(function(l, idx){
+          var cells = l.trim().replace(/^\||\|$/g, '').split('|').map(function(c){ return c.trim(); });
+          var tag = idx === 0 ? 'th' : 'td';
+          html += '<tr>' + cells.map(function(c){ return '<' + tag + '>' + escapeHtml(c) + '</' + tag + '>'; }).join('') + '</tr>';
+        });
+        html += '</table>';
+      }
+    } else {
+      if (line.trim()) html += '<p>' + escapeHtml(line) + '</p>';
+      i++;
+    }
+  }
+  return html || '<p>' + escapeHtml(text) + '</p>';
+}
+
+els.spaceContainer.addEventListener('click', function(e){
+  var btn = e.target.closest('[data-action="compare"]');
+  if (!btn) return;
+  var itemId = btn.dataset.itemId;
+  var reportEl = document.querySelector('[data-role="report"][data-item-id="' + itemId + '"]');
+  var pf = planFiles[itemId] || { final: [] };
+
+  btn.disabled = true;
+  btn.textContent = 'Сравниваю…';
+  reportEl.innerHTML = '<div class="loading-state">Claude сравнивает планировки…</div>';
+
+  var content = [];
+
+  if (houseInputs.quarterography){
+    content.push({ type:'text', text:'СНИМОК КВАРТИРОГРАФИИ (текущее назначение типов квартир в системе):' });
+    content.push(houseInputs.quarterography.mediaType === 'application/pdf'
+      ? { type:'document', source:{ type:'base64', media_type:houseInputs.quarterography.mediaType, data:houseInputs.quarterography.base64 } }
+      : { type:'image', source:{ type:'base64', media_type:houseInputs.quarterography.mediaType, data:houseInputs.quarterography.base64 } });
+  }
+
+  content.push({ type:'text', text:'ИСХОДНЫЕ ПЛАНИРОВКИ КАК ЕСТЬ — полные листы поэтажных планов (' + houseInputs.originalPlans.length + ' файл(ов)). Использовать для поиска конкретной квартиры на плане по секции/этажу/стояку из квартирографии, чтобы проверить её реальную геометрию и положение:' });
+  houseInputs.originalPlans.forEach(function(f){
+    content.push({ type:'text', text:'Файл: ' + f.name });
+    content.push(f.mediaType === 'application/pdf'
+      ? { type:'document', source:{ type:'base64', media_type:f.mediaType, data:f.base64 } }
+      : { type:'image', source:{ type:'base64', media_type:f.mediaType, data:f.base64 } });
+  });
+
+  if (houseInputs.cutPlans.length){
+    content.push({ type:'text', text:'НАРЕЗАННЫЕ ПЛАНИРОВКИ ПО ТИПАМ — отдельные вырезанные чертежи каждого типа (' + houseInputs.cutPlans.length + ' файл(ов)). Сопоставлять с квартирографией ПО НАЗВАНИЮ ТИПА (имя файла/подпись на чертеже должны совпадать с типом из квартирографии) и использовать как эталон точных площадей и геометрии этого типа:' });
+    houseInputs.cutPlans.forEach(function(f){
+      content.push({ type:'text', text:'Файл: ' + f.name });
+      content.push(f.mediaType === 'application/pdf'
+        ? { type:'document', source:{ type:'base64', media_type:f.mediaType, data:f.base64 } }
+        : { type:'image', source:{ type:'base64', media_type:f.mediaType, data:f.base64 } });
+    });
+  }
+
+  content.push({ type:'text', text:'ГОТОВЫЕ ОТРИСОВКИ — проверяемый результат дизайнера (' + pf.final.length + ' файл(ов)):' });
+  pf.final.forEach(function(f){
+    content.push({ type:'text', text:'Файл: ' + f.name });
+    content.push(f.mediaType === 'application/pdf'
+      ? { type:'document', source:{ type:'base64', media_type:f.mediaType, data:f.base64 } }
+      : { type:'image', source:{ type:'base64', media_type:f.mediaType, data:f.base64 } });
+  });
+
+  var extraNote = '\n\nДополнительно: ' +
+    (houseInputs.quarterography ? 'используй приложенный снимок квартирографии, чтобы понять, какой тип сейчас назначен каждой квартире в системе — это нужно для определения ошибок категории "оператор". ' : '') +
+    (houseInputs.cutPlans.length ? 'Нарезанные планировки по типам сопоставляй с квартирографией строго по названию типа (например 1-3490-4) — это эталон площадей и геометрии для готовой отрисовки. ' : '') +
+    'В исходных планировках "как есть" ищи конкретную квартиру на общем плане по секции/этажу/стояку из квартирографии, чтобы подтвердить, что назначенный тип действительно соответствует тому, что нарисовано на исходном плане в этом месте здания.';
+
+  content.push({ type:'text', text: COMPARE_INSTRUCTIONS + extraNote });
+
+  fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1000,
+      messages: [{ role:'user', content: content }]
+    })
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(data){
+    btn.disabled = false;
+    btn.textContent = 'Сравнить и сформировать отчёт';
+    if (!data || !data.content){
+      reportEl.innerHTML = '<div class="empty-state">Не удалось получить ответ от Claude. ' + escapeHtml(JSON.stringify(data)) + '</div>';
+      return;
+    }
+    var text = data.content.map(function(b){ return b.text || ''; }).join('\n');
+    reportEl.innerHTML = '<div class="report-box">' + mdTableToHtml(text) + '</div>';
+  })
+  .catch(function(err){
+    btn.disabled = false;
+    btn.textContent = 'Сравнить и сформировать отчёт';
+    reportEl.innerHTML = '<div class="empty-state">Ошибка запроса к Claude: ' + escapeHtml(String(err)) + '</div>';
+  });
+});
+
+/* ---------------------------------------------------------------------
+   ПОЛЯ ЗАДАЧИ: "Ссылка к папке с исходниками" и "Ссылка апартаментов"
+--------------------------------------------------------------------- */
+var taskFieldsMeta = { sourceField:null, apartmentField:null, ready:false, error:null };
+
+function resolveTaskFieldsMeta(callback){
+  if (taskFieldsMeta.ready || taskFieldsMeta.error){ callback(); return; }
+
+  if (TASK_SOURCE_FIELD_OVERRIDE && TASK_APARTMENT_FIELD_OVERRIDE){
+    taskFieldsMeta.sourceField = TASK_SOURCE_FIELD_OVERRIDE;
+    taskFieldsMeta.apartmentField = TASK_APARTMENT_FIELD_OVERRIDE;
+    taskFieldsMeta.ready = true; callback(); return;
+  }
+
+  BX24.callMethod('user.userfield.list', { filter: { ENTITY_ID: 'TASKS_TASK' } }, function(res){
+    if (res.error()){ taskFieldsMeta.error = 'Не удалось получить поля задач: ' + res.error(); callback(); return; }
+    var list = res.data() || [];
+    function titleOf(f){
+      var labels = f.EDIT_FORM_LABEL || f.LIST_COLUMN_LABEL || {};
+      return Object.keys(labels).map(function(k){ return labels[k]; }).join(' ');
+    }
+    function findOne(overrideVal, matchStr, label){
+      if (overrideVal) return overrideVal;
+      var m = list.filter(function(f){ return titleOf(f).toLowerCase().indexOf(matchStr) !== -1; });
+      if (m.length === 1) return m[0].FIELD_NAME;
+      taskFieldsMeta.error = (taskFieldsMeta.error ? taskFieldsMeta.error + ' ' : '') +
+        (m.length === 0
+          ? 'Поле задачи «' + label + '» не найдено.'
+          : 'Найдено несколько полей задачи для «' + label + '».');
+      return null;
+    }
+    taskFieldsMeta.sourceField = findOne(TASK_SOURCE_FIELD_OVERRIDE, TASK_SOURCE_FIELD_MATCH, 'Ссылка к папке с исходниками');
+    taskFieldsMeta.apartmentField = findOne(TASK_APARTMENT_FIELD_OVERRIDE, TASK_APARTMENT_FIELD_MATCH, 'Ссылка апартаментов');
+    taskFieldsMeta.ready = true;
+    callback();
+  });
+}
+
+function loadTaskLinksForPlanBlock(itemId, houseId){
+  var container = document.querySelector('[data-role="task-links"][data-item-id="' + itemId + '"]');
+  if (!container) return;
+
+  resolveTaskFieldsMeta(function(){
+    var filter = {}; filter[HOUSE_ID_FIELD] = houseId;
+    var select = ['ID','TITLE'];
+    if (taskFieldsMeta.sourceField) select.push(taskFieldsMeta.sourceField);
+    if (taskFieldsMeta.apartmentField) select.push(taskFieldsMeta.apartmentField);
+
+    BX24.callMethod('tasks.task.list', { filter: filter, select: select }, function(result){
+      if (result.error()){
+        container.innerHTML = '<div class="pc-missing">Не удалось загрузить задачи: ' + escapeHtml(result.error()) + '</div>';
+        return;
+      }
+      var tasks = (result.data() && (result.data().tasks || result.data())) || [];
+      if (!tasks.length){
+        container.innerHTML = '<div class="pc-missing">Задач с этим ID дома не найдено.</div>';
+        return;
+      }
+
+      var domain = (window.BX24 && BX24.getDomain && BX24.getDomain()) || '';
+      var taskUrl = function(id){ return domain ? ('https://' + domain + '/company/personal/user/0/tasks/task/view/' + id + '/') : null; };
+
+      function linkOrMissing(url, label){
+        if (url) return '<a class="pc-link" href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(label) + ' →</a>';
+        return '<span class="pc-missing">' + escapeHtml(label) + ' — не заполнено</span>';
+      }
+
+      if (taskFieldsMeta.error){
+        container.innerHTML = '<div class="pc-missing">' + escapeHtml(taskFieldsMeta.error) + ' Укажите TASK_SOURCE_FIELD_OVERRIDE / TASK_APARTMENT_FIELD_OVERRIDE.</div>';
+      } else {
+        container.innerHTML = '';
+      }
+
+      container.innerHTML += '<div class="list-box" style="margin-top:8px;">' + tasks.map(function(t){
+        var url = taskUrl(t.ID);
+        var titleHtml = url
+          ? '<a class="pc-link" href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(t.TITLE) + '</a>'
+          : escapeHtml(t.TITLE);
+        var srcUrl = taskFieldsMeta.sourceField ? t[taskFieldsMeta.sourceField] : null;
+        var aptUrl = taskFieldsMeta.apartmentField ? t[taskFieldsMeta.apartmentField] : null;
+        return '<div class="row">' +
+          '<div class="row-title">' + titleHtml + '</div>' +
+          '<div class="row-sub" style="margin-top:6px;display:flex;gap:14px;flex-wrap:wrap;">' +
+            linkOrMissing(srcUrl, 'Ссылка к папке с исходниками') +
+            linkOrMissing(aptUrl, 'Ссылка апартаментов в hart') +
+          '</div>' +
+        '</div>';
+      }).join('') + '</div>';
+    });
+  });
+}
+
+function loadTasks(houseId){
+  var filter = {}; filter[HOUSE_ID_FIELD] = houseId;
+  BX24.callMethod('tasks.task.list', { filter: filter, select: ['ID','TITLE','STATUS','DEADLINE','RESPONSIBLE_ID', HOUSE_ID_FIELD] }, function(result){
+    if (result.error()){ els.tasksContainer.innerHTML = '<div class="empty-state">Ошибка запроса: ' + escapeHtml(result.error()) + '</div>'; return; }
+    var tasks = (result.data() && (result.data().tasks || result.data())) || [];
+    if (!tasks || tasks.length === 0){ els.tasksContainer.innerHTML = '<div class="empty-state">Задач с ID дома «' + escapeHtml(houseId) + '» не найдено.</div>'; return; }
+
+    var ids = Array.from(new Set(tasks.map(function(t){ return t.RESPONSIBLE_ID; }).filter(Boolean)));
+    var batch = {};
+    ids.forEach(function(uid){ batch['user_' + uid] = ['user.get', { ID: uid }]; });
+
+    BX24.callBatch(batch, function(userResults){
+      var names = {};
+      ids.forEach(function(uid){
+        var r = userResults['user_' + uid];
+        var u = r && r.data && r.data()[0];
+        names[uid] = u ? (u.NAME + ' ' + u.LAST_NAME) : ('#' + uid);
+      });
+      els.tasksContainer.innerHTML = '<div class="list-box">' + tasks.map(function(t, i){
+        var stage = classifyTask(t);
+        var m = STAGE_META[stage];
+        var deadline = t.DEADLINE ? new Date(t.DEADLINE).toLocaleDateString('ru-RU') : '—';
+        var assignee = names[t.RESPONSIBLE_ID] || '—';
+        return '<div class="row"><div class="row-top">' +
+          '<span class="row-idx mono">' + String(i+1).padStart(2,'0') + '</span>' +
+          '<div style="flex:1;min-width:180px;">' +
+            '<div class="row-title">' + escapeHtml(t.TITLE) + '</div>' +
+            '<div class="row-sub mono">#' + t.ID + ' · ' + escapeHtml(assignee) + ' · срок ' + deadline + '</div>' +
+          '</div>' +
+          '<div class="badge" style="background:' + m.bg + ';color:' + m.color + ';">' + m.label + '</div>' +
+        '</div></div>';
+      }).join('') + '</div>';
+    });
+  });
+}
+
+els.searchBtn.addEventListener('click', search);
+els.input.addEventListener('keydown', function(e){ if (e.key === 'Enter') search(); });
+els.backBtn.addEventListener('click', resetToSearch);
+
+if (window.BX24){
+  BX24.init(function(){ els.authHint.textContent = 'подключено к порталу Bitrix24'; });
+} else {
+  els.authHint.textContent = 'откройте это приложение внутри портала Bitrix24';
+}
+</script>
+
+</body>
+</html>
