@@ -144,6 +144,8 @@
 </style>
 </head>
 <body>
+<div style="position:fixed;top:10px;right:10px;z-index:9999;background:#E7F6EE;border:1px solid #1F9D66;color:#146c48;padding:8px 12px;border-radius:4px;font:600 12px Inter,sans-serif;">READ-ONLY тест · данные Bitrix24 не изменяются</div>
+
 
 <div class="grid-backdrop"></div>
 
@@ -632,36 +634,8 @@ els.spaceContainer.addEventListener('click', function(e){
       } else if (currentUser.error){
         warnings.push(currentUser.error);
       }
+      promptEl.innerHTML = '<span class="prompt-status ok">✓ Тестовый режим: данные Bitrix24 не изменяются</span>' + renderPlanCheckBlock(itemId, itemsById[itemId] || {});
 
-      BX24.callMethod('crm.item.update', {
-        entityTypeId: spaceMeta.entityTypeId,
-        id: itemId,
-        fields: fields
-      }, function(res){
-        if (res.error()){
-          promptEl.innerHTML = '<span class="prompt-status err">Не удалось перенести карточку: ' + escapeHtml(res.error()) + '</span>';
-          return;
-        }
-        var okMsg = '✓ Взято в работу' + (fields[spaceMeta.inspectorField] ? ' · проверяющий: ' + escapeHtml(currentUser.name) : '');
-        var html = '<span class="prompt-status ok">' + okMsg + '</span>';
-        warnings.forEach(function(w){ html += '<div class="prompt-status err" style="margin-top:6px;flex-basis:100%;">' + escapeHtml(w) + '</div>'; });
-
-        var item = itemsById[itemId] || {};
-        var typeText = '';
-        if (spaceMeta.typeField){
-          var raw = item[spaceMeta.typeField];
-          if (raw != null){
-            typeText = (spaceMeta.typeFieldItems && spaceMeta.typeFieldItems[raw]) || String(raw);
-          }
-        }
-        var isPlanType = typeText.toLowerCase().indexOf(PLAN_TYPE_VALUE_MATCH) !== -1;
-
-        if (isPlanType){
-          html += renderPlanCheckBlock(itemId, item);
-        }
-
-        promptEl.innerHTML = html;
-      });
     });
   });
 });
