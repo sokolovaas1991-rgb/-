@@ -9,8 +9,8 @@
   =====================================================================
   ЧТО ЭТО
 
-  Локальное приложение Bitrix24. Секретов в коде нет — авторизация
-  идёт через BX24 SDK, когда страница открыта внутри портала (в iframe).
+  Веб-приложение для Bitrix24 в режиме входящего вебхука.
+  URL вебхука вводится пользователем на странице и не хранится в исходном коде.
 
   ЛОГИКА
 
@@ -37,12 +37,11 @@
 
   РАЗВЁРТЫВАНИЕ
   1. Разместить файл на публичном HTTPS-адресе (например GitHub Pages).
-  2. Bitrix24 → Разработчикам → Другое → Локальное приложение →
-     указать адрес файла. Права (scope): crm, task, user.
+  2. В Bitrix24 создать входящий вебхук с правами CRM, задачи и пользователи.
+  3. Открыть страницу терминала и вставить URL вебхука в поле ВХОДЯЩИЙ_WEBHOOK.
   =====================================================================
 -->
 
-<script src="https://api.bitrix24.com/api/v1/"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -157,6 +156,11 @@
       <p class="sub">Введите ID дома — терминал найдёт элементы в<br/>воронке «Качество» пространства «Отрисовки».</p>
     </div>
     <div class="panel">
+      <label class="field-label mono">ВХОДЯЩИЙ_WEBHOOK</label>
+      <div class="id-input-wrap" id="webhook-wrap">
+        <input id="webhook-url" class="mono" placeholder="https://ваш-портал.bitrix24.ru/rest/123/секрет/" autocomplete="off" type="password" />
+      </div>
+      <div class="count mono" style="margin:7px 0 16px;line-height:1.45;">Ссылка хранится только в текущей вкладке браузера и не записывается в GitHub.</div>
       <label class="field-label mono">ID_ДОМА</label>
       <div class="id-input-wrap" id="input-wrap">
         <input id="house-id" class="mono" placeholder="например, 4521" autocomplete="off" />
@@ -208,6 +212,79 @@
 </div>
 
 <script>
+/* =====================================================================
+   РЕЖИМ ВХОДЯЩЕГО ВЕБХУКА
+   Приложение открывается как обычная HTTPS-страница (например GitHub Pages).
+   URL входящего вебхука вводится вручную и хранится только в sessionStorage.
+   ===================================================================== */
+var webhookInput = document.getElementById('webhook-url');
+var webhookWrap = document.getElementById('webhook-wrap');
+var WEBHOOK_SESSION_KEY = 'renderCheckBitrixWebhook';
+
+function normalizeWebhookUrl(v){
+  v = String(v || '').trim();
+  if (v && v.slice(-1) !== '/') v += '/';
+  return v;
+}
+function getWebhookUrl(){ return normalizeWebhookUrl(webhookInput ? webhookInput.value : ''); }
+function isWebhookUrlValid(v){
+  try{
+    var u = new URL(normalizeWebhookUrl(v));
+    return u.protocol === 'https:' && /\/rest\/\d+\/[^/]+\/$/.test(u.pathname);
+  } catch(e){ return false; }
+}
+function bitrixMethodUrl(method){ return getWebhookUrl() + method + '.json'; }
+function bitrixFetch(method, params){
+  if (!isWebhookUrlValid(getWebhookUrl())) return Promise.reject(new Error('Укажите корректный URL входящего вебхука Bitrix24.'));
+  return fetch(bitrixMethodUrl(method), {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify(params || {})
+  }).then(function(r){
+    return r.json().catch(function(){ throw new Error('Bitrix24 вернул ответ, который не удалось прочитать. HTTP ' + r.status); });
+  }).then(function(data){
+    if (data && data.error) throw new Error(data.error_description || data.error);
+    return data ? data.result : null;
+  });
+}
+function wrapBitrixResult(data, err){
+  return {
+    error:function(){ return err ? (err.message || String(err)) : null; },
+    data:function(){ return data; }
+  };
+}
+
+// Совместимый слой для существующего кода терминала: BX24.callMethod / callBatch / getDomain.
+window.BX24 = {
+  init:function(cb){ if (cb) cb(); },
+  callMethod:function(method, params, cb){
+    bitrixFetch(method, params).then(function(data){ cb(wrapBitrixResult(data, null)); })
+      .catch(function(err){ cb(wrapBitrixResult(null, err)); });
+  },
+  callBatch:function(batch, cb){
+    var keys = Object.keys(batch || {});
+    Promise.all(keys.map(function(k){
+      var spec = batch[k] || [];
+      return bitrixFetch(spec[0], spec[1] || {})
+        .then(function(data){ return [k, wrapBitrixResult(data, null)]; })
+        .catch(function(err){ return [k, wrapBitrixResult(null, err)]; });
+    })).then(function(rows){
+      var out = {}; rows.forEach(function(r){ out[r[0]] = r[1]; }); cb(out);
+    });
+  },
+  getDomain:function(){
+    try{ return new URL(getWebhookUrl()).hostname; }catch(e){ return ''; }
+  }
+};
+
+if (webhookInput){
+  try{ webhookInput.value = sessionStorage.getItem(WEBHOOK_SESSION_KEY) || ''; }catch(e){}
+  webhookInput.addEventListener('input', function(){
+    try{ sessionStorage.setItem(WEBHOOK_SESSION_KEY, webhookInput.value.trim()); }catch(e){}
+    if (webhookWrap) webhookWrap.classList.remove('error');
+  });
+}
+
 /* =====================================================================
    РУЧНЫЕ НАСТРОЙКИ (заполнить, если автоопределение не подойдёт)
    ===================================================================== */
@@ -261,6 +338,8 @@ function classifyTask(task){
 }
 
 var els = {
+  webhookInput: document.getElementById('webhook-url'),
+  webhookWrap: document.getElementById('webhook-wrap'),
   input: document.getElementById('house-id'),
   inputWrap: document.getElementById('input-wrap'),
   errorText: document.getElementById('error-text'),
@@ -276,7 +355,7 @@ var els = {
 };
 
 function showError(msg){ els.errorText.textContent = msg; els.errorText.style.display = 'block'; els.inputWrap.classList.add('error'); }
-function clearError(){ els.errorText.style.display = 'none'; els.inputWrap.classList.remove('error'); }
+function clearError(){ els.errorText.style.display = 'none'; els.inputWrap.classList.remove('error'); if (els.webhookWrap) els.webhookWrap.classList.remove('error'); }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
 }
@@ -457,7 +536,13 @@ function resolveFlowMeta(callback){
 function search(){
   var id = els.input.value.trim();
   clearError();
+  if (!isWebhookUrlValid(getWebhookUrl())){
+    if (els.webhookWrap) els.webhookWrap.classList.add('error');
+    showError('Сначала вставьте корректный URL входящего вебхука Bitrix24.'); return;
+  }
   if (!id){ showError('Введите ID дома.'); return; }
+  try{ sessionStorage.setItem(WEBHOOK_SESSION_KEY, getWebhookUrl()); }catch(e){}
+  els.authHint.textContent = 'подключение через входящий вебхук…';
 
   currentHouseId = id;
   els.searchView.style.display = 'none';
@@ -1198,11 +1283,11 @@ els.searchBtn.addEventListener('click', search);
 els.input.addEventListener('keydown', function(e){ if (e.key === 'Enter') search(); });
 els.backBtn.addEventListener('click', resetToSearch);
 
-if (window.BX24){
-  BX24.init(function(){ els.authHint.textContent = 'подключено к порталу Bitrix24'; });
-} else {
-  els.authHint.textContent = 'откройте это приложение внутри портала Bitrix24';
-}
+BX24.init(function(){
+  els.authHint.textContent = isWebhookUrlValid(getWebhookUrl())
+    ? 'вебхук указан · введите ID дома'
+    : 'вставьте входящий вебхук Bitrix24';
+});
 </script>
 
 </body>
