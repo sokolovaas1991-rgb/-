@@ -77,6 +77,9 @@
   .id-input-wrap.error{ border-color:#E4A691; }
   #house-id{ border:none; outline:none; background:transparent; font-size:17px; width:100%; color:var(--ink); font-family:'JetBrains Mono',monospace; }
   #house-id::placeholder{ color:#B2BDCC; }
+  #check-comment{ width:100%; min-height:92px; resize:vertical; border:1px solid #C9D3E0; border-radius:3px; padding:12px 14px; background:#FCFDFE; color:var(--ink); font:14px/1.5 'Inter',sans-serif; outline:none; }
+  #check-comment:focus{ border-color:var(--accent); }
+  #check-comment::placeholder{ color:#B2BDCC; }
   .error-text{ margin-top:10px; font-size:13px; color:var(--red); line-height:1.5; }
   .btn-primary{
     margin-top:18px; width:100%; display:flex; align-items:center; justify-content:center;
@@ -167,6 +170,9 @@
       <div class="id-input-wrap" id="input-wrap">
         <input id="house-id" class="mono" placeholder="например, 4521" autocomplete="off" />
       </div>
+      <label class="field-label mono" style="margin-top:16px;">КОММЕНТАРИЙ К ПРОВЕРКЕ</label>
+      <textarea id="check-comment" placeholder="Например: проверить особенно внимательно секцию 2; не учитывать 2 уровень; корпус должен быть 1…"></textarea>
+      <div class="count mono" style="margin:7px 0 0;line-height:1.45;">Комментарий будет добавлен к условиям проверки для этого запуска.</div>
       <div id="error-text" class="error-text" style="display:none;"></div>
       <button id="search-btn" class="btn-primary">Найти дом →</button>
     </div>
@@ -182,6 +188,7 @@
     <div class="house-card">
       <span class="eyebrow mono" id="house-id-label" style="color:var(--faint);">ID_ДОМА —</span>
       <div class="house-title" id="house-title">—</div>
+      <div id="check-comment-display" style="display:none;margin-top:10px;font-size:13px;color:var(--muted);line-height:1.5;white-space:pre-wrap;"></div>
     </div>
 
     <div class="section-label mono">Данные для проверки планировок · загружаются один раз на дом</div>
@@ -366,6 +373,7 @@ var els = {
   webhookInput: document.getElementById('webhook-url'),
   webhookWrap: document.getElementById('webhook-wrap'),
   input: document.getElementById('house-id'),
+  commentInput: document.getElementById('check-comment'),
   inputWrap: document.getElementById('input-wrap'),
   errorText: document.getElementById('error-text'),
   searchBtn: document.getElementById('search-btn'),
@@ -375,6 +383,7 @@ var els = {
   backBtn: document.getElementById('back-btn'),
   houseIdLabel: document.getElementById('house-id-label'),
   houseTitle: document.getElementById('house-title'),
+  commentDisplay: document.getElementById('check-comment-display'),
   spaceContainer: document.getElementById('space-container'),
   tasksContainer: document.getElementById('tasks-container')
 };
@@ -398,6 +407,7 @@ var spaceMeta = { entityTypeId:null, houseField:null, ready:false, error:null };
 var flowMeta  = { categoryId:null, workStageId:null, ready:false, error:null };
 var itemsById = {};
 var currentHouseId = null;
+var currentCheckComment = '';
 var planFiles = {}; // { itemId: { original:[{name,mediaType,base64}], final:[...] } }
 var houseInputs = { quarterography: null, originalPlans: [], cutPlans: [] };
 
@@ -570,10 +580,15 @@ function search(){
   els.authHint.textContent = 'подключение через входящий вебхук…';
 
   currentHouseId = id;
+  currentCheckComment = (els.commentInput && els.commentInput.value || '').trim();
   els.searchView.style.display = 'none';
   els.resultsView.style.display = 'block';
   els.houseIdLabel.textContent = 'ID_ДОМА ' + id;
   els.houseTitle.textContent = 'Дом ' + id;
+  if (els.commentDisplay){
+    if (currentCheckComment){ els.commentDisplay.textContent = 'Комментарий к проверке: ' + currentCheckComment; els.commentDisplay.style.display = 'block'; }
+    else { els.commentDisplay.textContent = ''; els.commentDisplay.style.display = 'none'; }
+  }
   els.spaceContainer.innerHTML = '<div class="loading-state">Загрузка…</div>';
   els.tasksContainer.innerHTML = '<div class="loading-state">Загрузка…</div>';
 
@@ -1115,6 +1130,7 @@ els.spaceContainer.addEventListener('click', function(e){
   });
 
   var extraNote = '\n\nДополнительно: ' +
+    (currentCheckComment ? 'КОММЕНТАРИЙ ПОЛЬЗОВАТЕЛЯ К ЭТОЙ ПРОВЕРКЕ: ' + currentCheckComment + ' Учитывай этот комментарий как дополнительное условие проверки, не отменяя базовые правила выше. ' : '') +
     (houseInputs.quarterography ? 'используй приложенный снимок квартирографии, чтобы понять, какой тип сейчас назначен каждой квартире в системе — это нужно для определения ошибок категории "оператор". ' : '') +
     (houseInputs.cutPlans.length ? 'Нарезанные планировки по типам сопоставляй с квартирографией строго по названию типа (например 1-3490-4) — это эталон площадей и геометрии для готовой отрисовки. ' : '') +
     'В исходных планировках "как есть" ищи конкретную квартиру на общем плане по секции/этажу/стояку из квартирографии, чтобы подтвердить, что назначенный тип действительно соответствует тому, что нарисовано на исходном плане в этом месте здания.';
